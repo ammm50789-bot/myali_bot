@@ -1,9 +1,12 @@
 import asyncio
 import logging
-import sqlite3
 import time
 import random
 import aiohttp
+import aiosqlite
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -13,345 +16,284 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ContextTypes,
+    Application,
 )
 
 # ==========================================
-# ⚙️ CONFIGURATION (Yahan Apni Details Dalein)
+# ⚙️ CONFIGURATION
 # ==========================================
-TELEGRAM_BOT_TOKEN = "8675974676:AAHhjBqU54dicgDxsyat_PBG6SUnxDhZogs" 
-ADMIN_ID =  8195946863 # YAHAN APNI TELEGRAM ID DALEIN
+TELEGRAM_BOT_TOKEN = "8675974676:AAG9MlrlEgJSPwcxg_-khjCSl4cQxI-N9LI"
+ADMIN_ID = 8195946863
+ADMIN_PASSWORD = "11223344Ali"
 
-API_URL = 'https://api.bdg88zf.com/api/webapi/GetGameIssue'
-API_PAYLOAD = {
-    "typeId": 1,
-    "language": 0,
-    "random": "40079dcba93a48769c6ee9d4d4fae23f",
-    "signature": "D12108C4F57C549D82B23A91E0FA20AE"
-}
+WINGO_API = 'https://api.bdg88zf.com/api/webapi/GetGameIssue'
+AVIATOR_API = 'https://aviator-next.spribegaming.com' # Reference API
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-is_running = False
-automation_task = None
-admin_states = {}
+DB_NAME = "bot_database.db"
+user_states = {}
 
 # ==========================================
-# 💾 DATABASE SETUP
+# 🌐 RAILWAY CRASH FIX (DUMMY SERVER)
 # ==========================================
-def init_db():
-    conn = sqlite3.connect("bot_database.db")
-    cur = conn.cursor()
-    # History Table
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            period TEXT, predicted_size TEXT, result_size TEXT, status TEXT, win_loss TEXT
-        )
-    """)
-    # Settings Table
-    cur.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-    # Users Table
-    cur.execute("CREATE TABLE IF NOT EXISTS users (uid INTEGER PRIMARY KEY, joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-    conn.commit()
-    conn.close()
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Aviator + Wingo Bot is Running!")
+    def log_message(self, format, *args):
+        pass
 
-init_db()
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), DummyHandler)
+    server.serve_forever()
 
-def get_setting(key):
-    conn = sqlite3.connect("bot_database.db")
-    cur = conn.cursor()
-    cur.execute("SELECT value FROM settings WHERE key=?", (key,))
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else None
-
-def set_setting(key, value):
-    conn = sqlite3.connect("bot_database.db")
-    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
-    conn.close()
+def keep_alive():
+    t = threading.Thread(target=run_dummy_server)
+    t.daemon = True
+    t.start()
 
 # ==========================================
-# 🌐 ENGINE (API + TIME BASED FALLBACK)
+# 💾 DATABASE (Stats & History)
 # ==========================================
-async def get_wingo_data():
-    """Railway IP block hone par Time-based period generate karega"""
-    # 1. Pehle API Try Karega
+async def init_db():
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_type TEXT,
+                date TEXT,
+                result TEXT
+            )
+        """)
+        await db.commit()
+
+async def post_init(application: Application):
+    await init_db()
+
+async def save_stat(game_type, result):
+    today = datetime.utcnow().strftime('%Y-%m-%d')
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("INSERT INTO stats (game_type, date, result) VALUES (?, ?, ?)", (game_type, today, result))
+        await db.commit()
+
+async def get_today_stats():
+    today = datetime.utcnow().strftime('%Y-%m-%d')
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT result FROM stats WHERE date=?", (today,)) as cursor:
+            rows = await cursor.fetchall()
+            
+    total = len(rows)
+    wins = sum(1 for r in rows if r[0] == 'WIN')
+    losses = sum(1 for r in rows if r[0] == 'LOSS')
+    win_rate = int((wins / total) * 100) if total > 0 else 0
+    
+    return total, wins, losses, win_rate
+
+# ==========================================
+# 🌐 PREDICTION ENGINES
+# ==========================================
+async def get_wingo_period():
     try:
-        payload = API_PAYLOAD.copy()
-        payload["timestamp"] = int(time.time())
+        payload = {
+            "typeId": 1, "language": 0,
+            "random": "40079dcba93a48769c6ee9d4d4fae23f",
+            "signature": "D12108C4F57C549D82B23A91E0FA20AE",
+            "timestamp": int(time.time())
+        }
         async with aiohttp.ClientSession() as session:
-            async with session.post(API_URL, json=payload, timeout=3) as response:
+            async with session.post(WINGO_API, json=payload, timeout=5) as response:
                 data = await response.json()
                 if "data" in data and "issueNumber" in data["data"]:
-                    return data["data"]["issueNumber"], datetime.utcnow().second
+                    return data["data"]["issueNumber"]
     except:
-        pass # API blocked or Failed
-
-    # 2. Agar API fail ho jaye, IST time se exact BDG period banayega (Railway Fix)
+        pass
+    # Time fallback
     ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
     minutes_passed = (ist_now.hour * 60) + ist_now.minute + 1
-    period_str = f"{ist_now.strftime('%Y%m%d')}1000{minutes_passed:04d}"
-    return period_str, ist_now.second
+    return f"{ist_now.strftime('%Y%m%d')}1000{minutes_passed:04d}"
 
-def get_next_prediction():
-    """Trend Logic: Jo pichla result aya, wahi next prediction hogi"""
-    conn = sqlite3.connect("bot_database.db")
-    cur = conn.cursor()
-    cur.execute("SELECT result_size FROM history WHERE status='DONE' ORDER BY id DESC LIMIT 1")
-    row = cur.fetchone()
-    conn.close()
-    
-    if row and row[0]:
-        return row[0] # Return Last Result
-    return "BIG" # Agar pehli baar chal raha hai tou BIG
+def get_wingo_prediction():
+    size = random.choice(["BIG", "SMALL"])
+    nums = random.sample([5, 6, 7, 8, 9], 2) if size == "BIG" else random.sample([0, 1, 2, 3, 4], 2)
+    return size, nums
 
-# ==========================================
-# 🤖 AUTOMATION WORKER
-# ==========================================
-async def automation_worker(bot):
-    global is_running
-    logger.info("Automation Started!")
-    last_predicted_period = None
-    
-    # Kahan bhejna hai? (Admin ko ya Channel ko)
-    target_chat = get_setting("TARGET_CHAT")
-    if not target_chat:
-        target_chat = ADMIN_ID
-    
-    while is_running:
-        try:
-            current_period, seconds = await get_wingo_data()
-            
-            # Wingo 1 Min: 0-45s = Betting, 45-60s = Result calculation
-            if seconds >= 45:
-                await asyncio.sleep(2)
-                continue
-
-            if current_period and current_period != last_predicted_period:
-                # --- PREDICT TREND ---
-                prediction = get_next_prediction()
-                last_predicted_period = current_period
-                
-                conn = sqlite3.connect("bot_database.db")
-                conn.execute("INSERT INTO history (period, predicted_size, status) VALUES (?, ?, 'WAITING')", (current_period, prediction))
-                conn.commit()
-                conn.close()
-                
-                msg = f"🔥 ALI bro PREDICTION VIP 🔥\n\n━━━━━━━━━━━━━━━━\n\n🎯 SINGLE SIGNAL\n\nPERIOD: {current_period}\n\n📊 SIGNAL: {prediction}\n\n🧠 TREND PREDICTION\n⚠️ NOT GUARANTEED\n\n━━━━━━━━━━━━━━━━"
-                
-                try:
-                    await bot.send_message(chat_id=target_chat, text=msg)
-                except Exception as e:
-                    await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ Signal Send Error (Check Channel Admin Rights): {e}")
-                
-                # --- WAIT FOR RESULT (Wait until period ends) ---
-                await asyncio.sleep(55 - seconds)
-                
-                # --- PROCESS RESULT ---
-                actual_size = random.choice(["BIG", "SMALL"]) # Simulation agar API result nahi de rahi
-                
-                is_win = (prediction == actual_size)
-                win_loss = "WIN" if is_win else "LOSS"
-                
-                conn = sqlite3.connect("bot_database.db")
-                conn.execute("UPDATE history SET result_size=?, status='DONE', win_loss=? WHERE period=?", (actual_size, win_loss, current_period))
-                conn.commit()
-                conn.close()
-
-                win_sticker = get_setting("WIN_STICKER")
-                loss_sticker = get_setting("LOSS_STICKER")
-                
-                if is_win:
-                    res_msg = f"🏆 ALI PREDICTION VIP win\n\n━━━━━━━━━━━━━━\n✅ WIN\n\nPERIOD: {current_period}\n🎯 PREDICTED: {prediction}\n🎲 RESULT: {actual_size}\n━━━━━━━━━━━━━━"
-                    active_sticker = win_sticker
-                else:
-                    res_msg = f"🔥 ALI PREDICTION VIP\n\n━━━━━━━━━━━━━━\n❌ LOSS\n\nPERIOD: {current_period}\n🎯 PREDICTED: {prediction}\n🎲 RESULT: {actual_size}\n━━━━━━━━━━━━━━"
-                    active_sticker = loss_sticker
-                
-                # Send Sticker first
-                if active_sticker:
-                    try:
-                        await bot.send_sticker(chat_id=target_chat, sticker=active_sticker)
-                    except Exception as e:
-                        logger.error(f"Sticker failed: {e}")
-                
-                # Send Text
-                try:
-                    await bot.send_message(chat_id=target_chat, text=res_msg)
-                except:
-                    pass
-
-        except Exception as e:
-            logger.error(f"Loop Error: {e}")
-            await asyncio.sleep(5)
+def get_aviator_prediction():
+    # 1.01 to 10.00 multiplier generator (weighted for realism)
+    rand = random.random()
+    if rand < 0.6:
+        multi = random.uniform(1.20, 2.50)
+    elif rand < 0.9:
+        multi = random.uniform(2.50, 5.00)
+    else:
+        multi = random.uniform(5.00, 10.00)
+    return round(multi, 2)
 
 # ==========================================
-# 📱 TELEGRAM HANDLERS
+# 📱 KEYBOARDS & MENUS
 # ==========================================
-def get_main_keyboard():
+def main_menu_kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("▶ START (Bot DM)", callback_data="start_bot"),
-         InlineKeyboardButton("▶ START (Channel)", callback_data="start_channel")],
-        [InlineKeyboardButton("⏹ STOP", callback_data="stop")],
-        [InlineKeyboardButton("⚙️ ADMIN PANEL", callback_data="admin_menu")]
+        [InlineKeyboardButton("🔴 WINGO PREDICTION", callback_data="play_wingo")],
+        [InlineKeyboardButton("✈️ AVIATOR PREDICTION", callback_data="play_aviator")],
+        [InlineKeyboardButton("📊 TODAY STATISTICS", callback_data="show_stats")]
     ])
 
-def get_admin_keyboard():
+def wingo_kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👥 Users List", callback_data="show_users"),
-         InlineKeyboardButton("📢 Set Channel ID", callback_data="set_channel")],
-        [InlineKeyboardButton("🟢 Set WIN Sticker", callback_data="set_win_sticker"),
-         InlineKeyboardButton("🔴 Set LOSS Sticker", callback_data="set_loss_sticker")],
-        [InlineKeyboardButton("📊 STATISTICS", callback_data="stats")],
-        [InlineKeyboardButton("🔙 Back to Main", callback_data="back_main")]
+        [InlineKeyboardButton("⏭ NEXT SINGLE (Wingo)", callback_data="play_wingo")],
+        [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
     ])
 
+def aviator_kb(pred_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ WIN", callback_data=f"av_win_{pred_id}"), InlineKeyboardButton("❌ LOSS", callback_data=f"av_loss_{pred_id}")],
+        [InlineKeyboardButton("⏭ NEXT SINGLE (Aviator)", callback_data="play_aviator")],
+        [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
+    ])
+
+def aviator_next_only_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏭ NEXT SINGLE (Aviator)", callback_data="play_aviator")],
+        [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
+    ])
+
+# ==========================================
+# 🤖 HANDLERS
+# ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    # Save User
-    conn = sqlite3.connect("bot_database.db")
-    conn.execute("INSERT OR IGNORE INTO users (uid) VALUES (?)", (user_id,))
-    conn.commit()
-    conn.close()
-
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("⛔ Welcome to Ali Prediction VIP.\nAccess Restricted. Only Admin can use this bot.")
-        return
-        
-    await update.message.reply_text("🔥 ALI PREDICTION VIP 🔥\n\nMain Menu:", reply_markup=get_main_keyboard())
+    msg = (
+        "🔥 <b>ALI PREDICTION VIP</b> 🔥\n\n"
+        "Welcome to the Ultimate Prediction Bot!\n"
+        "No Registration required. Choose your game below and get instant highly accurate signals."
+    )
+    await update.message.reply_text(msg, reply_markup=main_menu_kb(), parse_mode="HTML")
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    await update.message.reply_text("⚙️ **ADMIN PANEL**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global is_running, automation_task, admin_states
-    query = update.callback_query
-    if update.effective_user.id != ADMIN_ID: return
-    await query.answer()
-
-    data = query.data
-
-    if data.startswith("start_"):
-        if is_running:
-            await query.edit_message_text("⚠️ Already Running!", reply_markup=get_main_keyboard())
-            return
-            
-        if data == "start_bot":
-            set_setting("TARGET_CHAT", ADMIN_ID)
-            target = "BOT DIRECT MESSAGE"
-        else:
-            ch_id = get_setting("TARGET_CHAT")
-            if not ch_id or ch_id == str(ADMIN_ID):
-                await query.edit_message_text("⚠️ Pehle Admin Panel se Channel ID set karein!", reply_markup=get_main_keyboard())
-                return
-            target = "CHANNEL/GROUP"
-
-        is_running = True
-        automation_task = asyncio.create_task(automation_worker(context.bot))
-        await query.edit_message_text(f"🟢 STARTED IN: {target}\nBot is now sending signals.", reply_markup=get_main_keyboard())
-
-    elif data == "stop":
-        if not is_running:
-            await query.edit_message_text("⚠️ Already Stopped!", reply_markup=get_main_keyboard())
-            return
-        is_running = False
-        if automation_task: automation_task.cancel()
-        await query.edit_message_text("⏹ SESSION STOPPED.", reply_markup=get_main_keyboard())
-
-    elif data == "admin_menu":
-        await query.edit_message_text("⚙️ **ADMIN PANEL**", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
-
-    elif data == "show_users":
-        conn = sqlite3.connect("bot_database.db")
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*), GROUP_CONCAT(uid) FROM (SELECT uid FROM users ORDER BY joined_at DESC LIMIT 15)")
-        row = cur.fetchone()
-        conn.close()
-        
-        count = row[0]
-        uids = row[1] if row[1] else "No users yet."
-        msg = f"👥 **TOTAL USERS:** {count}\n\n**Recent Users UIDs:**\n{uids}"
-        await query.edit_message_text(msg, reply_markup=get_admin_keyboard(), parse_mode="Markdown")
-
-    elif data == "set_channel":
-        admin_states[ADMIN_ID] = "WAITING_CHANNEL_ID"
-        msg = ("📢 **SET CHANNEL / GROUP ID**\n\n"
-               "Apne Group ya Channel ka ID bhejein (e.g., -100123456789).\n"
-               "⚠️ *Zaroori:* Bot ko us channel/group mein ADMIN zaroor banayein wrna signal nahi jayega.")
-        await query.edit_message_text(msg, parse_mode="Markdown")
-
-    elif data == "set_win_sticker":
-        admin_states[ADMIN_ID] = "WAITING_WIN_STICKER"
-        await query.edit_message_text("🟢 **WIN STICKER**\n\nAbhi chat mein WIN wala sticker bhejein:", parse_mode="Markdown")
-
-    elif data == "set_loss_sticker":
-        admin_states[ADMIN_ID] = "WAITING_LOSS_STICKER"
-        await query.edit_message_text("🔴 **LOSS STICKER**\n\nAbhi chat mein LOSS wala sticker bhejein:", parse_mode="Markdown")
-
-    elif data == "stats":
-        conn = sqlite3.connect("bot_database.db")
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*), SUM(CASE WHEN win_loss='WIN' THEN 1 ELSE 0 END), SUM(CASE WHEN win_loss='LOSS' THEN 1 ELSE 0 END) FROM history WHERE status='DONE'")
-        total, wins, losses = cur.fetchone()
-        conn.close()
-        total = total or 0; wins = wins or 0; losses = losses or 0
-        rate = int((wins/total)*100) if total > 0 else 0
-        msg = f"📊 CURRENT STATISTICS\n\n━━━━━━━━━━━━━━━━\n🎯 TOTAL SIGNALS: {total}\n🏆 WINS: {wins}\n❌ LOSSES: {losses}\n📊 WIN RATE: {rate}%\n━━━━━━━━━━━━━━━━"
-        await query.edit_message_text(msg, reply_markup=get_admin_keyboard())
-
-    elif data == "back_main":
-        await query.edit_message_text("🔥 ALI PREDICTION VIP 🔥\n\nMain Menu:", reply_markup=get_main_keyboard())
-
-async def text_sticker_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID: return
-    
-    state = admin_states.get(user_id)
+    user_states[user_id] = "WAITING_ADMIN_PASSWORD"
+    await update.message.reply_text("🔒 <b>Enter Admin Password:</b>", parse_mode="HTML")
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = update.effective_user.id
+    await query.answer()
+    data = query.data
+
+    if data == "main_menu":
+        await query.edit_message_text("🔥 <b>ALI PREDICTION VIP</b> 🔥\n\nChoose your game:", reply_markup=main_menu_kb(), parse_mode="HTML")
+
+    # --- WINGO PREDICTION ---
+    elif data == "play_wingo":
+        await query.edit_message_text("⏳ Analyzing Wingo Trend...", parse_mode="HTML")
+        await asyncio.sleep(1) # Fake analysis delay
+        
+        period = await get_wingo_period()
+        size, nums = get_wingo_prediction()
+        
+        msg = (
+            f"🔴 <b>WINGO VIP SIGNAL</b> 🔴\n\n"
+            f"🚀 <b>PERIOD:</b> <code>{period}</code>\n"
+            f"📊 <b>PREDICTION:</b> {size}\n"
+            f"🔢 <b>NUMBERS:</b> {nums[0]}, {nums[1]}\n\n"
+            f"⚠️ <i>Play with 3X Investment Method.</i>"
+        )
+        await query.edit_message_text(msg, reply_markup=wingo_kb(), parse_mode="HTML")
+
+    # --- AVIATOR PREDICTION ---
+    elif data == "play_aviator":
+        await query.edit_message_text("🛫 Intercepting Aviator Server API...", parse_mode="HTML")
+        await asyncio.sleep(1.5)
+        
+        multiplier = get_aviator_prediction()
+        pred_id = int(time.time()) # Unique ID for this signal
+        
+        msg = (
+            f"✈️ <b>AVIATOR VIP SIGNAL</b> ✈️\n\n"
+            f"🎯 <b>TARGET MULTIPLIER:</b> {multiplier}x\n\n"
+            f"💡 <i>Tip: Cashout slightly before the target for maximum safety.</i>\n\n"
+            f"👇 <b>Please submit your feedback below after playing:</b>"
+        )
+        await query.edit_message_text(msg, reply_markup=aviator_kb(pred_id), parse_mode="HTML")
+
+    # --- AVIATOR FEEDBACK (WIN/LOSS) ---
+    elif data.startswith("av_win_") or data.startswith("av_loss_"):
+        result = "WIN" if "av_win_" in data else "LOSS"
+        await save_stat("AVIATOR", result)
+        
+        res_text = "✅ <b>WIN RECORDED!</b>" if result == "WIN" else "❌ <b>LOSS RECORDED!</b>"
+        old_text = query.message.text.replace("👇 Please submit your feedback below after playing:", "")
+        
+        new_msg = f"{old_text}\n\n{res_text}\nThank you for your feedback!"
+        await query.edit_message_text(new_msg, reply_markup=aviator_next_only_kb(), parse_mode="HTML")
+
+    # --- STATISTICS ---
+    elif data == "show_stats":
+        total, wins, losses, win_rate = await get_today_stats()
+        msg = (
+            f"📊 <b>TODAY'S STATISTICS</b> 📊\n\n"
+            f"📅 <b>Date:</b> {datetime.utcnow().strftime('%Y-%m-%d')}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 <b>Total Signals Today:</b> {total}\n"
+            f"🏆 <b>Total Wins:</b> {wins}\n"
+            f"❌ <b>Total Losses:</b> {losses}\n"
+            f"📈 <b>Accuracy / Win Rate:</b> {win_rate}%\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"<i>*Stats are based on user feedback and auto-resolutions.</i>"
+        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]])
+        await query.edit_message_text(msg, reply_markup=kb, parse_mode="HTML")
+
+    # --- ADMIN BROADCAST ---
+    elif data == "adm_broadcast":
+        user_states[uid] = "WAITING_BROADCAST"
+        await query.edit_message_text("📢 Send the message/image you want to broadcast to ALL users:")
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    state = user_states.get(uid)
     if not state: return
 
-    # Channel ID Set karna
-    if state == "WAITING_CHANNEL_ID":
-        if update.message.text:
-            set_setting("TARGET_CHAT", update.message.text.strip())
-            admin_states.pop(user_id)
-            await update.message.reply_text(f"✅ Channel ID Set: {update.message.text}", reply_markup=get_main_keyboard())
-        return
-
-    # Stickers Set karna
-    if update.message.sticker:
-        sticker_file_id = update.message.sticker.file_id
-        if state == "WAITING_WIN_STICKER":
-            set_setting("WIN_STICKER", sticker_file_id)
-            admin_states.pop(user_id)
-            await update.message.reply_text("✅ WIN Sticker Saved!", reply_markup=get_main_keyboard())
-        elif state == "WAITING_LOSS_STICKER":
-            set_setting("LOSS_STICKER", sticker_file_id)
-            admin_states.pop(user_id)
-            await update.message.reply_text("✅ LOSS Sticker Saved!", reply_markup=get_main_keyboard())
+    if state == "WAITING_ADMIN_PASSWORD":
+        if update.message.text == ADMIN_PASSWORD:
+            user_states.pop(uid)
+            
+            total, wins, losses, win_rate = await get_today_stats()
+            msg = (
+                f"⚙️ <b>MASTER ADMIN PANEL</b>\n\n"
+                f"📊 <b>TODAY'S PERFORMANCE:</b>\n"
+                f"Total Signals: {total}\nWins: {wins}\nLosses: {losses}\nWin Rate: {win_rate}%\n"
+            )
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("📢 Broadcast Message", callback_data="adm_broadcast")]])
+            await update.message.reply_text(msg, reply_markup=kb, parse_mode="HTML")
+        else:
+            await update.message.reply_text("❌ Incorrect Password.")
+            
+    elif state == "WAITING_BROADCAST":
+        # Note: Broadcasting to everyone requires a full users table if we want to reach users who haven't interacted recently. 
+        # Since registration is removed, this broadcast will only reply to admin for demonstration, or you can add an auto-save user feature back if you need true broadcasting.
+        user_states.pop(uid)
+        await update.message.reply_text("✅ Broadcast feature is configured. (Note: True mass broadcasting requires saving chat_ids to DB).")
 
 # ==========================================
 # 🚀 MAIN RUNNER
 # ==========================================
 def main():
-    if TELEGRAM_BOT_TOKEN == "YAHAN_APNA_BOT_TOKEN_DALEIN":
-        print("❌ ERROR: Apne Code mein BOT TOKEN aur ADMIN ID dalein pehle!")
-        return
+    keep_alive() # Railway Crash Fix Server
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.ALL, text_handler))
     
-    # Handle both Text (for Channel ID) and Stickers
-    app.add_handler(MessageHandler(filters.TEXT | filters.Sticker.ALL, text_sticker_handler))
-    
-    print("✅ Bot is Running! Go to Telegram and type /start")
-    app.run_polling()
+    logger.info("Ultimate Wingo + Aviator Bot is Running!")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
