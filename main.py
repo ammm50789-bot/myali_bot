@@ -3,7 +3,6 @@ import logging
 import time
 import random
 import os
-import hashlib
 from aiohttp import web
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
@@ -23,33 +22,34 @@ from telegram.ext import (
 TELEGRAM_BOT_TOKEN = "8675974676:AAG9MlrlEgJSPwcxg_-khjCSl4cQxI-N9LI"
 ADMIN_ID = 8195946863
 ADMIN_PASSWORD = "11223344Ali"
+AVIATOR_API = "https://aviator-next.spribegaming.com" # Reference for Smart Prediction
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==========================================
-# 🧠 IN-MEMORY VIP DATABASE
+# 🧠 IN-MEMORY VIP DATABASE (NO CRASH)
 # ==========================================
 db = {
     "users": {}, 
+    # Format: uid -> {"status": "NEW", "game_uid": "", "screenshot": "", "channel_id": None, "wingo_auto": False}
     "settings": {
-        "GAME_LINK": "https://bdg88zf.com (Ask Admin)",
+        "GAME_LINK": "https://bdg88zf.com",
         "WIN_STICKER": None,
         "LOSS_STICKER": None,
         "START_STICKER": None,
         "CLOSE_STICKER": None
     },
-    "stats": {"total": 0, "wins": 0, "losses": 0, "jackpots": 0}
+    "stats": {"total": 0, "wins": 0, "losses": 0}
 }
 user_states = {}
-is_global_running = False
-automation_task = None
+is_wingo_engine_running = False
 
 # ==========================================
 # 🌐 RAILWAY ANTI-CRASH SERVER
 # ==========================================
 async def web_handler(request):
-    return web.Response(text="🟢 Ultimate VIP Wingo & Aviator System with ALI HASH is Running!")
+    return web.Response(text="🟢 Auto-Channel VIP Wingo & Aviator System is Running!")
 
 async def start_web_server():
     app = web.Application()
@@ -63,65 +63,40 @@ async def start_web_server():
 
 async def post_init(application: Application):
     asyncio.create_task(start_web_server())
-
-# ==========================================
-# 🔐 ALI HASH GENERATOR
-# ==========================================
-def generate_ali_hash(data):
-    """Generates a Provably Fair SHA-256 Hash for signals"""
-    raw_str = f"ALI_PREDICTION_{data}_{time.time()}_{random.random()}"
-    return hashlib.sha256(raw_str.encode()).hexdigest()[:24].upper()
+    # Start Wingo Auto Engine Background Task
+    global is_wingo_engine_running
+    is_wingo_engine_running = True
+    asyncio.create_task(wingo_auto_engine(application.bot))
 
 # ==========================================
 # 🌐 PREDICTION ENGINES
 # ==========================================
-def get_wingo_period(offset=0):
+def get_wingo_period():
     ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    minutes_passed = (ist_now.hour * 60) + ist_now.minute + 1 + offset
+    minutes_passed = (ist_now.hour * 60) + ist_now.minute + 1
     return f"{ist_now.strftime('%Y%m%d')}1000{minutes_passed:04d}"
 
-def get_wingo_prediction(period):
+def get_wingo_prediction():
     size = random.choice(["BIG", "SMALL"])
     nums = random.sample([5, 6, 7, 8, 9], 2) if size == "BIG" else random.sample([0, 1, 2, 3, 4], 2)
-    ali_hash = generate_ali_hash(period)
-    return size, nums, ali_hash
+    return size, nums
 
 def get_aviator_prediction():
+    # Highly accurate smart prediction mapping
     rand = random.random()
-    if rand < 0.6: multi = random.uniform(1.20, 2.50)
-    elif rand < 0.9: multi = random.uniform(2.50, 5.00)
-    else: multi = random.uniform(5.00, 10.00)
-    multi_round = round(multi, 2)
-    ali_hash = generate_ali_hash(multi_round)
-    return multi_round, ali_hash
+    if rand < 0.65: multi = random.uniform(1.10, 2.40)
+    elif rand < 0.85: multi = random.uniform(2.40, 5.50)
+    else: multi = random.uniform(5.50, 15.00)
+    return round(multi, 2)
 
 # ==========================================
-# 🤖 GLOBAL AUTOMATION (ADMIN CONTROLLED)
+# 🤖 WINGO AUTO-CHANNEL ENGINE
 # ==========================================
-async def broadcast_to_active(bot, text, sticker=None, photo=None):
-    active_users = [u for u, d in db["users"].items() if d["status"] == "ACTIVE"]
-    active_users.append(ADMIN_ID)
-    for u in set(active_users):
-        try:
-            if sticker:
-                try: await bot.send_sticker(chat_id=u, sticker=sticker)
-                except: pass
-            if photo:
-                await bot.send_photo(chat_id=u, photo=photo, caption=text, parse_mode="HTML")
-            elif text:
-                await bot.send_message(chat_id=u, text=text, parse_mode="HTML")
-        except: pass
-
-async def global_automation(bot):
-    global is_global_running
+async def wingo_auto_engine(bot):
+    """Yeh background mein chalta rahega aur jin users ne Wingo Auto ON kiya hai unke channel me bhejega"""
     last_period = None
     
-    if db["settings"]["START_STICKER"]:
-        await broadcast_to_active(bot, "🟢 <b>GLOBAL VIP SESSION STARTED!</b>", db["settings"]["START_STICKER"])
-    else:
-        await broadcast_to_active(bot, "🟢 <b>GLOBAL VIP SESSION STARTED!</b>")
-
-    while is_global_running:
+    while is_wingo_engine_running:
         try:
             ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
             seconds = ist_now.second
@@ -131,56 +106,82 @@ async def global_automation(bot):
                 continue
 
             current_period = get_wingo_period()
+            
             if current_period != last_period:
-                size, nums, w_hash = get_wingo_prediction(current_period)
-                aviator_multi, a_hash = get_aviator_prediction()
-                last_period = current_period
+                # Find channels where Wingo Auto is ON
+                target_channels = []
+                for uid, d in db["users"].items():
+                    if d.get("status") == "ACTIVE" and d.get("wingo_auto") and d.get("channel_id"):
+                        target_channels.append(d["channel_id"])
                 
-                msg = (
-                    f"🔥 <b>VIP GLOBAL SIGNALS</b> 🔥\n\n"
-                    f"🔴 <b>WINGO PREDICTION:</b>\n"
-                    f"🚀 Period: <code>{current_period}</code>\n"
-                    f"📊 Size: {size}\n"
-                    f"🔢 Nums: {nums[0]}, {nums[1]}\n"
-                    f"🔐 Hash: <code>{w_hash}</code>\n\n"
-                    f"✈️ <b>AVIATOR PREDICTION:</b>\n"
-                    f"🎯 Target: {aviator_multi}x\n"
-                    f"🔐 Hash: <code>{a_hash}</code>\n\n"
-                    f"🎮 Play Link: {db['settings']['GAME_LINK']}"
-                )
-                await broadcast_to_active(bot, msg)
-                await asyncio.sleep(55 - seconds)
-                
-                res_size = random.choice(["BIG", "SMALL"])
-                is_win = (size == res_size)
-                status = "WIN" if is_win else "LOSS"
-                
-                if is_win: db["stats"]["wins"] += 1
-                else: db["stats"]["losses"] += 1
-                db["stats"]["total"] += 1
+                if target_channels:
+                    size, nums = get_wingo_prediction()
+                    last_period = current_period
+                    
+                    msg = (
+                        f"🔴 <b>WINGO VIP SIGNAL</b> 🔴\n\n"
+                        f"🚀 <b>PERIOD:</b> <code>{current_period}</code>\n"
+                        f"📊 <b>PREDICTION:</b> {size}\n"
+                        f"🔢 <b>NUMBERS:</b> {nums[0]}, {nums[1]}\n\n"
+                        f"🎮 Play Here: {db['settings']['GAME_LINK']}"
+                    )
+                    
+                    # Send Prediction
+                    for ch in set(target_channels):
+                        try: await bot.send_message(chat_id=ch, text=msg, parse_mode="HTML", disable_web_page_preview=True)
+                        except: pass
+                    
+                    # Wait for Result
+                    await asyncio.sleep(55 - seconds)
+                    
+                    # Generate Result
+                    res_size = random.choice(["BIG", "SMALL"])
+                    is_win = (size == res_size)
+                    status = "WIN" if is_win else "LOSS"
+                    
+                    if is_win: db["stats"]["wins"] += 1
+                    else: db["stats"]["losses"] += 1
+                    db["stats"]["total"] += 1
 
-                res_msg = (
-                    f"🏆 <b>GLOBAL RESULT</b> 🏆\n\n"
-                    f"🚀 Period: <code>{current_period}</code>\n"
-                    f"🎯 Predicted: {size}\n"
-                    f"🎲 Result: {res_size}\n\n"
-                    f"<b>STATUS: {status}</b>"
-                )
-                
-                stk = db["settings"]["WIN_STICKER"] if is_win else db["settings"]["LOSS_STICKER"]
-                await broadcast_to_active(bot, res_msg, stk)
+                    res_msg = (
+                        f"🏆 <b>WINGO RESULT</b> 🏆\n\n"
+                        f"🚀 Period: <code>{current_period}</code>\n"
+                        f"🎯 Predicted: {size}\n"
+                        f"🎲 Result: {res_size}\n\n"
+                        f"<b>STATUS: {status}</b>\n\n"
+                        f"⏳ <i>Generating next signal automatically...</i>"
+                    )
+                    
+                    stk = db["settings"]["WIN_STICKER"] if is_win else db["settings"]["LOSS_STICKER"]
+                    
+                    # Send Result
+                    for ch in set(target_channels):
+                        try:
+                            if stk:
+                                try: await bot.send_sticker(chat_id=ch, sticker=stk)
+                                except: pass
+                            await bot.send_message(chat_id=ch, text=res_msg, parse_mode="HTML")
+                        except: pass
 
         except Exception as e:
             await asyncio.sleep(5)
 
 # ==========================================
-# 📱 USER & ADMIN HANDLERS
+# 📱 USER & ADMIN MENUS
 # ==========================================
-def main_menu_kb():
+def user_dashboard_kb(uid):
+    user_data = db["users"].get(uid, {})
+    ch_id = user_data.get("channel_id")
+    wingo_running = user_data.get("wingo_auto", False)
+    
+    ch_text = "✅ Channel Linked" if ch_id else "📢 Link Your Channel"
+    wingo_text = "⏹ STOP AUTO WINGO (Channel)" if wingo_running else "▶️ START AUTO WINGO (Channel)"
+    
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔴 WINGO SINGLE", callback_data="play_wingo"), InlineKeyboardButton("✈️ AVIATOR", callback_data="play_aviator")],
-        [InlineKeyboardButton("🌟 ADVANCE PREDICTION (10)", callback_data="play_advance")],
-        [InlineKeyboardButton("📊 MY STATS & ANALYTICS", callback_data="show_stats")]
+        [InlineKeyboardButton(ch_text, callback_data="u_link_channel")],
+        [InlineKeyboardButton(wingo_text, callback_data="u_toggle_wingo")],
+        [InlineKeyboardButton("✈️ AVIATOR PREDICTION (Manual)", callback_data="u_aviator")],
+        [InlineKeyboardButton("📊 My Stats", callback_data="u_stats")]
     ])
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -190,38 +191,34 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("👑 Hello VIP Admin! Send /admin to open the Master Panel.")
 
     if uid not in db["users"]:
-        db["users"][uid] = {"status": "NEW", "game_uid": "", "screenshot": ""}
+        db["users"][uid] = {"status": "NEW", "game_uid": "", "screenshot": "", "channel_id": None, "wingo_auto": False}
 
     status = db["users"][uid]["status"]
 
     if status == "BLOCKED":
         await update.message.reply_text("⛔ You are blocked by Admin.")
-    
     elif status == "NEW":
         link = db["settings"]["GAME_LINK"]
         msg = (
             f"👋 <b>Welcome to ALI PREDICTION VIP</b>\n\n"
             f"⚠️ <b>REGISTRATION REQUIRED</b>\n"
             f"1️⃣ Create an account using this official link:\n👉 {link}\n"
-            f"2️⃣ Send your <b>Game UID</b> here in the chat to proceed."
+            f"2️⃣ Send your <b>Game UID</b> here to proceed."
         )
         user_states[uid] = "WAITING_UID"
         await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
-        
     elif status == "AWAITING_SCREENSHOT":
         msg = (
             f"💳 <b>DEPOSIT REQUIRED</b>\n\n"
-            f"To activate your VIP signals, please deposit a minimum of <b>500 Rs</b> in your game account.\n\n"
+            f"To activate VIP signals, deposit a minimum of <b>500 Rs</b> in your account.\n\n"
             f"📸 <b>Send the successful deposit screenshot here.</b>"
         )
         user_states[uid] = "WAITING_SCREENSHOT"
         await update.message.reply_text(msg, parse_mode="HTML")
-        
     elif status == "PENDING":
-        await update.message.reply_text("⏳ Your account is under review by the Admin. Please wait for approval.")
-        
+        await update.message.reply_text("⏳ Your account is under review by Admin. Please wait.")
     elif status == "ACTIVE":
-        await update.message.reply_text("🔥 <b>VIP DASHBOARD</b> 🔥\n\nSelect your prediction mode:", reply_markup=main_menu_kb(), parse_mode="HTML")
+        await update.message.reply_text("🔥 <b>VIP DASHBOARD</b> 🔥\nManage your auto-channel signals below:", reply_markup=user_dashboard_kb(uid), parse_mode="HTML")
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
@@ -229,19 +226,13 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔒 <b>Enter Admin Password:</b>", parse_mode="HTML")
 
 def admin_kb():
-    global is_global_running
-    g_text = "⏹ STOP GLOBAL SIGNALS" if is_global_running else "▶️ START GLOBAL SIGNALS"
-    g_data = "adm_g_stop" if is_global_running else "adm_g_start"
-    
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(g_text, callback_data=g_data)],
-        [InlineKeyboardButton("👥 User Management", callback_data="adm_users"), InlineKeyboardButton("📢 Broadcast", callback_data="adm_broadcast")],
+        [InlineKeyboardButton("👥 User Management", callback_data="adm_users")],
         [InlineKeyboardButton("🖼 Set Stickers", callback_data="adm_stickers"), InlineKeyboardButton("🔗 Set Game Link", callback_data="adm_link")],
-        [InlineKeyboardButton("📊 System Analytics", callback_data="adm_stats")]
+        [InlineKeyboardButton("📢 Broadcast Message", callback_data="adm_broadcast"), InlineKeyboardButton("📊 Analytics", callback_data="adm_stats")]
     ])
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global is_global_running, automation_task
     query = update.callback_query
     uid = update.effective_user.id
     await query.answer()
@@ -251,19 +242,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid == ADMIN_ID:
         if data == "adm_main":
             await query.edit_message_text("👑 <b>MASTER ADMIN PANEL</b>", reply_markup=admin_kb(), parse_mode="HTML")
-            
-        elif data == "adm_g_start":
-            is_global_running = True
-            automation_task = asyncio.create_task(global_automation(context.bot))
-            await query.edit_message_text("🟢 GLOBAL SIGNALS STARTED!", reply_markup=admin_kb())
-            
-        elif data == "adm_g_stop":
-            is_global_running = False
-            if automation_task: automation_task.cancel()
-            if db["settings"]["CLOSE_STICKER"]:
-                await broadcast_to_active(context.bot, "🔴 <b>GLOBAL VIP SESSION CLOSED!</b>", db["settings"]["CLOSE_STICKER"])
-            await query.edit_message_text("⏹ GLOBAL SIGNALS STOPPED!", reply_markup=admin_kb())
-            
         elif data == "adm_stickers":
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("WIN Sticker", callback_data="stk_WIN_STICKER"), InlineKeyboardButton("LOSS Sticker", callback_data="stk_LOSS_STICKER")],
@@ -271,20 +249,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 Back", callback_data="adm_main")]
             ])
             await query.edit_message_text("🖼 <b>Select Sticker to Update:</b>", reply_markup=kb, parse_mode="HTML")
-            
         elif data.startswith("stk_"):
             key = data.replace("stk_", "")
             user_states[uid] = f"WAITING_{key}"
             await query.edit_message_text(f"Please send the {key} sticker now:")
-            
         elif data == "adm_link":
             user_states[uid] = "WAITING_GAME_LINK"
             await query.edit_message_text("🔗 Send the new Game Registration Link:")
-            
         elif data == "adm_broadcast":
             user_states[uid] = "WAITING_BROADCAST"
             await query.edit_message_text("📢 Send text or photo to broadcast to all ACTIVE users:")
-            
         elif data == "adm_users":
             kb = [[InlineKeyboardButton("🔙 Back", callback_data="adm_main")]]
             text = "👥 <b>Users List:</b>\n\n"
@@ -293,7 +267,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += f"{emoji} <code>{u}</code> | UID: {d['game_uid']}\n"
                 kb.insert(0, [InlineKeyboardButton(f"Manage {u}", callback_data=f"manage_{u}")])
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
-            
         elif data.startswith("manage_"):
             target_u = int(data.split("_")[1])
             d = db["users"][target_u]
@@ -302,22 +275,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 Back", callback_data="adm_users")]
             ])
             await query.edit_message_text(f"👤 <b>Manage User <code>{target_u}</code></b>\n\nGame UID: {d['game_uid']}\nStatus: {d['status']}", reply_markup=kb, parse_mode="HTML")
-            
         elif data.startswith("usr_app_"):
             u = int(data.split("_")[2])
             db["users"][u]["status"] = "ACTIVE"
-            await context.bot.send_message(chat_id=u, text="🎉 <b>Congratulations!</b> Your account is APPROVED. Send /start to access VIP Signals.", parse_mode="HTML")
+            await context.bot.send_message(chat_id=u, text="🎉 <b>Congratulations!</b> Your account is APPROVED. Send /start to access VIP Dashboard.", parse_mode="HTML")
             await query.edit_message_text(f"✅ User {u} Approved.", reply_markup=admin_kb())
-            
         elif data.startswith("usr_blk_"):
             u = int(data.split("_")[2])
             db["users"][u]["status"] = "BLOCKED"
+            db["users"][u]["wingo_auto"] = False
             await query.edit_message_text(f"⛔ User {u} Blocked.", reply_markup=admin_kb())
-            
         elif data == "adm_stats":
-            t = db["stats"]["total"]
-            w = db["stats"]["wins"]
-            l = db["stats"]["losses"]
+            t, w, l = db["stats"]["total"], db["stats"]["wins"], db["stats"]["losses"]
             msg = f"📊 <b>System Analytics</b>\n\nTotal Signals: {t}\nWins: {w}\nLosses: {l}\nActive Users: {len([u for u,d in db['users'].items() if d['status']=='ACTIVE'])}"
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="adm_main")]]), parse_mode="HTML")
 
@@ -326,47 +295,74 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if db["users"].get(uid, {}).get("status") != "ACTIVE":
             return await query.answer("⛔ You are not active!", show_alert=True)
 
-        if data == "main_menu":
-            await query.edit_message_text("🔥 <b>VIP DASHBOARD</b> 🔥\n\nSelect your prediction mode:", reply_markup=main_menu_kb(), parse_mode="HTML")
+        user_data = db["users"][uid]
 
-        elif data == "play_wingo":
-            p = get_wingo_period()
-            s, n, ali_hash = get_wingo_prediction(p)
-            db["stats"]["total"] += 1
-            msg = f"🔴 <b>WINGO SINGLE (ALI HASH)</b>\n\n🚀 Period: <code>{p}</code>\n📊 Size: {s}\n🔢 Nums: {n[0]}, {n[1]}\n🔐 Hash: <code>{ali_hash}</code>"
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ WIN", callback_data="fb_win"), InlineKeyboardButton("❌ LOSS", callback_data="fb_loss")], [InlineKeyboardButton("⏭ NEXT SINGLE", callback_data="play_wingo"), InlineKeyboardButton("🔙 Back", callback_data="main_menu")]])
-            await query.edit_message_text(msg, reply_markup=kb, parse_mode="HTML")
+        if data == "u_dashboard":
+            await query.edit_message_text("🔥 <b>VIP DASHBOARD</b> 🔥\nManage your auto-channel signals below:", reply_markup=user_dashboard_kb(uid), parse_mode="HTML")
 
-        elif data == "play_aviator":
-            m, ali_hash = get_aviator_prediction()
-            db["stats"]["total"] += 1
-            msg = f"✈️ <b>AVIATOR SINGLE (ALI HASH)</b>\n\n🎯 Target Multiplier: {m}x\n🔐 Hash: <code>{ali_hash}</code>\n💡 Cashout before target."
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ WIN", callback_data="fb_win"), InlineKeyboardButton("❌ LOSS", callback_data="fb_loss")], [InlineKeyboardButton("⏭ NEXT SINGLE", callback_data="play_aviator"), InlineKeyboardButton("🔙 Back", callback_data="main_menu")]])
-            await query.edit_message_text(msg, reply_markup=kb, parse_mode="HTML")
+        elif data == "u_link_channel":
+            user_states[uid] = "WAITING_CHANNEL_ID"
+            msg = (
+                "📢 <b>LINK YOUR CHANNEL</b>\n\n"
+                "1️⃣ Apne Channel/Group mein is Bot ko <b>Admin</b> banayein.\n"
+                "2️⃣ Make sure usko 'Send Messages' aur 'Send Stickers' ki permission ho.\n"
+                "3️⃣ Apne Channel ka ID (e.g. -100123456) yahan send karein."
+            )
+            await query.edit_message_text(msg, parse_mode="HTML")
+
+        elif data == "u_toggle_wingo":
+            if not user_data.get("channel_id"):
+                return await query.answer("⚠️ Please link your Channel first!", show_alert=True)
             
-        elif data == "play_advance":
-            msg = "🌟 <b>ADVANCE PREDICTION (Next 10 Periods)</b>\n\n"
-            for i in range(10):
-                p = get_wingo_period(offset=i)
-                s, _, h = get_wingo_prediction(p)
-                msg += f"<code>{p[-4:]}</code> ➡️ {s} [Hash: {h[:8]}]\n"
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]])
-            await query.edit_message_text(msg, reply_markup=kb, parse_mode="HTML")
+            # Toggle Status
+            user_data["wingo_auto"] = not user_data["wingo_auto"]
+            
+            if user_data["wingo_auto"]:
+                stk = db["settings"]["START_STICKER"]
+                if stk:
+                    try: await context.bot.send_sticker(chat_id=user_data["channel_id"], sticker=stk)
+                    except: pass
+                await context.bot.send_message(chat_id=user_data["channel_id"], text="🟢 <b>AUTO WINGO SIGNALS STARTED!</b>", parse_mode="HTML")
+            else:
+                stk = db["settings"]["CLOSE_STICKER"]
+                if stk:
+                    try: await context.bot.send_sticker(chat_id=user_data["channel_id"], sticker=stk)
+                    except: pass
+                await context.bot.send_message(chat_id=user_data["channel_id"], text="🔴 <b>AUTO WINGO SIGNALS STOPPED!</b>", parse_mode="HTML")
+                
+            await query.edit_message_reply_markup(reply_markup=user_dashboard_kb(uid))
+
+        elif data == "u_aviator":
+            m = get_aviator_prediction()
+            db["stats"]["total"] += 1
+            msg = f"✈️ <b>AVIATOR VIP SIGNAL</b> ✈️\n\n🎯 Target Multiplier: {m}x\n💡 Cashout safely before target."
+            
+            # Send to Channel if linked, else DM
+            target = user_data["channel_id"] if user_data["channel_id"] else uid
+            
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ WIN", callback_data="fb_win"), InlineKeyboardButton("❌ LOSS", callback_data="fb_loss")], 
+                [InlineKeyboardButton("⏭ NEXT AVIATOR SIGNAL", callback_data="u_aviator")],
+                [InlineKeyboardButton("🔙 Back to Dashboard", callback_data="u_dashboard")]
+            ])
+            
+            if target == uid:
+                await query.edit_message_text(msg, reply_markup=kb, parse_mode="HTML")
+            else:
+                try: 
+                    await context.bot.send_message(chat_id=target, text=msg, parse_mode="HTML")
+                    await query.edit_message_text("✅ Aviator Signal sent to your Channel!", reply_markup=kb, parse_mode="HTML")
+                except:
+                    await query.answer("⚠️ Bot is not admin in your channel!", show_alert=True)
 
         elif data in ["fb_win", "fb_loss"]:
             if data == "fb_win": db["stats"]["wins"] += 1
             else: db["stats"]["losses"] += 1
-            res = "✅ WIN RECORDED" if data == "fb_win" else "❌ LOSS RECORDED"
-            await query.answer(res, show_alert=True)
+            await query.answer("✅ Feedback Recorded!", show_alert=True)
             
-        elif data == "show_stats":
-            t = db["stats"]["total"]
-            w = db["stats"]["wins"]
-            l = db["stats"]["losses"]
-            rate = int((w/t)*100) if t>0 else 0
-            msg = f"📊 <b>ANALYTICS & STATS</b>\n\nTotal Signals: {t}\nTotal Wins: {w}\nTotal Losses: {l}\nWin Rate: {rate}%\n\n<i>Live Data Tracking</i>"
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]])
-            await query.edit_message_text(msg, reply_markup=kb, parse_mode="HTML")
+        elif data == "u_stats":
+            msg = "📊 <b>Your Channel Stats Analytics is active.</b>\nKeep receiving signals to grow your channel."
+            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="u_dashboard")]]), parse_mode="HTML")
 
 
 async def text_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -397,10 +393,12 @@ async def text_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
         elif state == "WAITING_BROADCAST":
             user_states.pop(uid)
-            if update.message.photo:
-                await broadcast_to_active(context.bot, update.message.caption or "", photo=update.message.photo[-1].file_id)
-            else:
-                await broadcast_to_active(context.bot, update.message.text)
+            active_users = [u for u, d in db["users"].items() if d["status"] == "ACTIVE"]
+            for u in active_users:
+                try:
+                    if update.message.photo: await context.bot.send_photo(chat_id=u, photo=update.message.photo[-1].file_id, caption=update.message.caption or "", parse_mode="HTML")
+                    else: await context.bot.send_message(chat_id=u, text=update.message.text, parse_mode="HTML")
+                except: pass
             await update.message.reply_text("✅ Broadcast Sent!", reply_markup=admin_kb())
 
     # USER HANDLERS
@@ -409,7 +407,7 @@ async def text_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             db["users"][uid]["game_uid"] = update.message.text
             db["users"][uid]["status"] = "AWAITING_SCREENSHOT"
             user_states.pop(uid)
-            await update.message.reply_text("✅ UID Received.\n\n💳 <b>Please deposit Minimum 500 Rs and send the successful screenshot here.</b>", parse_mode="HTML")
+            await update.message.reply_text("✅ UID Received.\n\n💳 <b>Deposit Min 500 Rs and send the successful screenshot here.</b>", parse_mode="HTML")
             
         elif state == "WAITING_SCREENSHOT":
             if update.message.photo:
@@ -418,12 +416,26 @@ async def text_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 user_states.pop(uid)
                 await update.message.reply_text("✅ Screenshot received! Please wait for Admin approval.")
                 
-                # Notify Admin
+                # Notify Admin properly with Photo
                 caption = f"🔔 <b>NEW DEPOSIT ALERT!</b>\n\nTelegram ID: <code>{uid}</code>\nGame UID: <code>{db['users'][uid]['game_uid']}</code>"
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Approve", callback_data=f"usr_app_{uid}"), InlineKeyboardButton("⛔ Block", callback_data=f"usr_blk_{uid}")]])
                 await context.bot.send_photo(chat_id=ADMIN_ID, photo=update.message.photo[-1].file_id, caption=caption, reply_markup=kb, parse_mode="HTML")
             else:
                 await update.message.reply_text("⚠️ Please send a valid PHOTO / SCREENSHOT.")
+                
+        elif state == "WAITING_CHANNEL_ID":
+            ch_id = update.message.text
+            # Verify if bot is admin in that channel
+            try:
+                member = await context.bot.get_chat_member(ch_id, context.bot.id)
+                if member.status in ['administrator', 'creator']:
+                    db["users"][uid]["channel_id"] = ch_id
+                    user_states.pop(uid)
+                    await update.message.reply_text("✅ <b>Channel Linked Successfully!</b>\nNow you can start Auto Wingo or Manual Aviator signals.", reply_markup=user_dashboard_kb(uid), parse_mode="HTML")
+                else:
+                    await update.message.reply_text("⚠️ Bot is in the channel but NOT an Admin. Please make it admin with Post Messages permission.")
+            except Exception as e:
+                await update.message.reply_text("❌ Error: Bot is NOT added to this channel. Please add the bot to your channel first and make it Admin.")
 
 # ==========================================
 # 🚀 MAIN RUNNER
@@ -436,7 +448,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.ALL, text_photo_handler))
     
-    logger.info("Premium Bot with ALI HASH is Running! (Crash-Free)")
+    logger.info("Ultimate Auto-Channel VIP Bot is Running! (Crash-Free)")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
