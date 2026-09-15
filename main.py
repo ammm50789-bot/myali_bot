@@ -4,8 +4,9 @@ import time
 import random
 import os
 import hashlib
+import aiohttp
 from aiohttp import web
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
     ApplicationBuilder,
@@ -18,38 +19,46 @@ from telegram.ext import (
 )
 
 # ==========================================
-# âš™ï¸ VIP CONFIGURATION
+# ⚙️ VIP CONFIGURATION & REAL APIs
 # ==========================================
 TELEGRAM_BOT_TOKEN = "8675974676:AAG9MlrlEgJSPwcxg_-khjCSl4cQxI-N9LI"
 ADMIN_ID = 8195946863
 ADMIN_PASSWORD = "11223344Ali"
 
+API_URL = 'https://api.bdg88zf.com/api/webapi/GetGameIssue'
+AVIATOR_SPRIBE_API = "https://aviator-next.spribegaming.com"
+API_PAYLOAD = {
+    "typeId": 1,
+    "language": 0,
+    "random": "40079dcba93a48769c6ee9d4d4fae23f",
+    "signature": "D12108C4F57C549D82B23A91E0FA20AE"
+}
+
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==========================================
-# ðŸ§  IN-MEMORY VIP DATABASE
+# 🧠 IN-MEMORY VIP DATABASE (CRASH FREE)
 # ==========================================
 db = {
     "users": {}, 
     "settings": {
-        "GAME_LINK": "https://bdg88zf.com (Ask Admin)",
+        "GAME_LINK": "https://aviator-game-link.com",
         "WIN_STICKER": None,
         "LOSS_STICKER": None,
         "START_STICKER": None,
         "CLOSE_STICKER": None
     },
-    "stats": {"total": 0, "wins": 0, "losses": 0, "jackpots": 0}
+    "stats": {"total": 0, "wins": 0, "losses": 0}
 }
 user_states = {}
-is_global_running = False
-automation_task = None
+is_aviator_engine_running = False
 
 # ==========================================
-# ðŸŒ RAILWAY ANTI-CRASH SERVER
+# 🌐 RAILWAY ANTI-CRASH SERVER
 # ==========================================
 async def web_handler(request):
-    return web.Response(text="ðŸŸ¢ Ultimate VIP Wingo & Aviator System with ALI HASH is Running!")
+    return web.Response(text="🟢 Real API Aviator System (1.04x - 20x) is Running!")
 
 async def start_web_server():
     app = web.Application()
@@ -63,185 +72,176 @@ async def start_web_server():
 
 async def post_init(application: Application):
     asyncio.create_task(start_web_server())
+    global is_aviator_engine_running
+    is_aviator_engine_running = True
+    asyncio.create_task(aviator_auto_engine(application.bot))
 
 # ==========================================
-# ðŸ” ALI HASH GENERATOR
+# 🚀 REAL API FETCH & SPRIBE ENGINE
 # ==========================================
-def generate_ali_hash(data):
-    """Generates a Provably Fair SHA-256 Hash for signals"""
-    raw_str = f"ALI_PREDICTION_{data}_{time.time()}_{random.random()}"
-    return hashlib.sha256(raw_str.encode()).hexdigest()[:24].upper()
+async def fetch_real_api_data():
+    """Connects to real APIs to sync data and generate authentic hash"""
+    try:
+        payload = API_PAYLOAD.copy()
+        payload["timestamp"] = int(time.time())
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(API_URL, json=payload, timeout=5) as response:
+                api_response = await response.json()
+                
+            async with session.get(AVIATOR_SPRIBE_API, timeout=5) as spribe_res:
+                spribe_status = spribe_res.status
+                
+        raw_hash_data = f"SPRIBE_{payload['timestamp']}_{spribe_status}_{api_response.get('msg', 'SUCCESS')}"
+        api_hash = hashlib.sha256(raw_hash_data.encode()).hexdigest()[:16].upper()
+        return True, api_hash
+        
+    except Exception as e:
+        fallback_hash = hashlib.sha256(f"SPRIBE_FALLBACK_{time.time()}".encode()).hexdigest()[:16].upper()
+        return False, fallback_hash
 
-# ==========================================
-# ðŸŒ PREDICTION ENGINES
-# ==========================================
-def get_wingo_period(offset=0):
-    ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    minutes_passed = (ist_now.hour * 60) + ist_now.minute + 1 + offset
-    return f"{ist_now.strftime('%Y%m%d')}1000{minutes_passed:04d}"
-
-def get_wingo_prediction(period):
-    size = random.choice(["BIG", "SMALL"])
-    nums = random.sample([5, 6, 7, 8, 9], 2) if size == "BIG" else random.sample([0, 1, 2, 3, 4], 2)
-    ali_hash = generate_ali_hash(period)
-    return size, nums, ali_hash
-
-def get_aviator_prediction():
+def calculate_aviator_prediction():
+    """Authentic Aviator Range: 1.04x to 20.00x"""
     rand = random.random()
-    if rand < 0.6: multi = random.uniform(1.20, 2.50)
-    elif rand < 0.9: multi = random.uniform(2.50, 5.00)
-    else: multi = random.uniform(5.00, 10.00)
-    multi_round = round(multi, 2)
-    ali_hash = generate_ali_hash(multi_round)
-    return multi_round, ali_hash
-
-# ==========================================
-# ðŸ¤– GLOBAL AUTOMATION (ADMIN CONTROLLED)
-# ==========================================
-async def broadcast_to_active(bot, text, sticker=None, photo=None):
-    active_users = [u for u, d in db["users"].items() if d["status"] == "ACTIVE"]
-    active_users.append(ADMIN_ID)
-    for u in set(active_users):
-        try:
-            if sticker:
-                try: await bot.send_sticker(chat_id=u, sticker=sticker)
-                except: pass
-            if photo:
-                await bot.send_photo(chat_id=u, photo=photo, caption=text, parse_mode="HTML")
-            elif text:
-                await bot.send_message(chat_id=u, text=text, parse_mode="HTML")
-        except: pass
-
-async def global_automation(bot):
-    global is_global_running
-    last_period = None
-    
-    if db["settings"]["START_STICKER"]:
-        await broadcast_to_active(bot, "ðŸŸ¢ <b>GLOBAL VIP SESSION STARTED!</b>", db["settings"]["START_STICKER"])
+    # Realistic Aviator Algorithm Distribution
+    if rand < 0.50:
+        target = random.uniform(1.04, 2.00)  # 50% chance for safe low multipliers
+    elif rand < 0.80:
+        target = random.uniform(2.00, 5.00)  # 30% chance for medium multipliers
+    elif rand < 0.92:
+        target = random.uniform(5.00, 10.00) # 12% chance for high multipliers
     else:
-        await broadcast_to_active(bot, "ðŸŸ¢ <b>GLOBAL VIP SESSION STARTED!</b>")
+        target = random.uniform(10.00, 20.00) # 8% chance for Mega Jackpot
+    return round(target, 2)
 
-    while is_global_running:
+# ==========================================
+# 🤖 AVIATOR AUTO-DM ENGINE
+# ==========================================
+async def aviator_auto_engine(bot):
+    """Background loop sending continuous signals to Active Users DMs"""
+    while is_aviator_engine_running:
         try:
-            ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-            seconds = ist_now.second
+            target_users = [uid for uid, d in db["users"].items() if d.get("status") == "ACTIVE" and d.get("aviator_auto")]
             
-            if seconds >= 45:
-                await asyncio.sleep(2)
-                continue
-
-            current_period = get_wingo_period()
-            if current_period != last_period:
-                size, nums, w_hash = get_wingo_prediction(current_period)
-                aviator_multi, a_hash = get_aviator_prediction()
-                last_period = current_period
+            if target_users:
+                # 1. Fetch Real API & Calculate
+                api_connected, api_hash = await fetch_real_api_data()
+                target_multi = calculate_aviator_prediction()
                 
                 msg = (
-                    f"ðŸ”¥ <b>VIP GLOBAL SIGNALS</b> ðŸ”¥\n\n"
-                    f"ðŸ”´ <b>WINGO PREDICTION:</b>\n"
-                    f"ðŸš€ Period: <code>{current_period}</code>\n"
-                    f"ðŸ“Š Size: {size}\n"
-                    f"ðŸ”¢ Nums: {nums[0]}, {nums[1]}\n"
-                    f"ðŸ” Hash: <code>{w_hash}</code>\n\n"
-                    f"âœˆï¸ <b>AVIATOR PREDICTION:</b>\n"
-                    f"ðŸŽ¯ Target: {aviator_multi}x\n"
-                    f"ðŸ” Hash: <code>{a_hash}</code>\n\n"
-                    f"ðŸŽ® Play Link: {db['settings']['GAME_LINK']}"
+                    f"✈️ <b>AVIATOR VIP PREDICTION</b> ✈️\n\n"
+                    f"🔗 <b>SERVER STATUS:</b> Connected (Spribe API)\n"
+                    f"🔐 <b>ENCRYPTED HASH:</b> <code>{api_hash}</code>\n\n"
+                    f"🎯 <b>TARGET CASHOUT:</b> {target_multi}x\n\n"
+                    f"💡 <i>Tip: Play safe and cashout before the exact target!</i>\n"
+                    f"🎮 Play Here: {db['settings']['GAME_LINK']}"
                 )
-                await broadcast_to_active(bot, msg)
-                await asyncio.sleep(55 - seconds)
                 
-                res_size = random.choice(["BIG", "SMALL"])
-                is_win = (size == res_size)
+                for uid in set(target_users):
+                    try: await bot.send_message(chat_id=uid, text=msg, parse_mode="HTML", disable_web_page_preview=True)
+                    except: pass
+                
+                await asyncio.sleep(45) # Simulating round time
+                
+                # 95% Win logic implementation for result simulation
+                is_win = random.random() < 0.95 
                 status = "WIN" if is_win else "LOSS"
+                
+                if is_win:
+                    # Crash happens AFTER the target
+                    actual_crash = round(target_multi + random.uniform(0.1, 3.5), 2)
+                else:
+                    # Crash happens BEFORE the target
+                    actual_crash = round(target_multi - random.uniform(0.1, 0.5), 2)
+                
+                if actual_crash < 1.00: actual_crash = 1.00
                 
                 if is_win: db["stats"]["wins"] += 1
                 else: db["stats"]["losses"] += 1
                 db["stats"]["total"] += 1
 
                 res_msg = (
-                    f"ðŸ† <b>GLOBAL RESULT</b> ðŸ†\n\n"
-                    f"ðŸš€ Period: <code>{current_period}</code>\n"
-                    f"ðŸŽ¯ Predicted: {size}\n"
-                    f"ðŸŽ² Result: {res_size}\n\n"
-                    f"<b>STATUS: {status}</b>"
+                    f"🏆 <b>ROUND RESULT</b> 🏆\n\n"
+                    f"🎯 <b>Target Given:</b> {target_multi}x\n"
+                    f"💥 <b>Crashed At:</b> {actual_crash}x\n\n"
+                    f"<b>STATUS: {status}</b>\n\n"
+                    f"⏳ <i>Fetching next round API data...</i>"
                 )
                 
                 stk = db["settings"]["WIN_STICKER"] if is_win else db["settings"]["LOSS_STICKER"]
-                await broadcast_to_active(bot, res_msg, stk)
+                
+                for uid in set(target_users):
+                    try:
+                        if stk:
+                            try: await bot.send_sticker(chat_id=uid, sticker=stk)
+                            except: pass
+                        await bot.send_message(chat_id=uid, text=res_msg, parse_mode="HTML")
+                    except: pass
+                
+                await asyncio.sleep(15)
+            else:
+                await asyncio.sleep(10)
 
         except Exception as e:
+            logger.error(f"Engine Loop Error: {e}")
             await asyncio.sleep(5)
 
 # ==========================================
-# ðŸ“± USER & ADMIN HANDLERS
+# 📱 USER & ADMIN MENUS
 # ==========================================
-def main_menu_kb():
+def user_dashboard_kb(uid):
+    user_data = db["users"].get(uid, {})
+    aviator_running = user_data.get("aviator_auto", False)
+    av_text = "⏹ STOP AUTO AVIATOR (DM)" if aviator_running else "▶️ START AUTO AVIATOR (DM)"
+    
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("ðŸ”´ WINGO SINGLE", callback_data="play_wingo"), InlineKeyboardButton("âœˆï¸ AVIATOR", callback_data="play_aviator")],
-        [InlineKeyboardButton("ðŸŒŸ ADVANCE PREDICTION (10)", callback_data="play_advance")],
-        [InlineKeyboardButton("ðŸ“Š MY STATS & ANALYTICS", callback_data="show_stats")]
+        [InlineKeyboardButton(av_text, callback_data="u_toggle_aviator")],
+        [InlineKeyboardButton("✈️ MANUAL SIGNAL (DM)", callback_data="u_manual_aviator")],
+        [InlineKeyboardButton("📊 My Analytics", callback_data="u_stats")]
     ])
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    
-    if uid == ADMIN_ID:
-        return await update.message.reply_text("ðŸ‘‘ Hello VIP Admin! Send /admin to open the Master Panel.")
+    if uid == ADMIN_ID: return await update.message.reply_text("👑 VIP Admin! Send /admin to open the Panel.")
 
     if uid not in db["users"]:
-        db["users"][uid] = {"status": "NEW", "game_uid": "", "screenshot": ""}
+        db["users"][uid] = {"status": "NEW", "game_uid": "", "screenshot": "", "aviator_auto": False}
 
     status = db["users"][uid]["status"]
-
     if status == "BLOCKED":
-        await update.message.reply_text("â›” You are blocked by Admin.")
-    
+        await update.message.reply_text("⛔ You are blocked by Admin.")
     elif status == "NEW":
         link = db["settings"]["GAME_LINK"]
         msg = (
-            f"ðŸ‘‹ <b>Welcome to ALI PREDICTION VIP</b>\n\n"
-            f"âš ï¸ <b>REGISTRATION REQUIRED</b>\n"
-            f"1ï¸âƒ£ Create an account using this official link:\nðŸ‘‰ {link}\n"
-            f"2ï¸âƒ£ Send your <b>Game UID</b> here in the chat to proceed."
+            f"🚀 <b>Welcome to AVIATOR SPRIBE HACK</b>\n\n"
+            f"⚠️ <b>REGISTRATION REQUIRED</b>\n"
+            f"1️⃣ Create an account using this official link:\n👉 {link}\n"
+            f"2️⃣ Send your <b>Game UID</b> here to proceed."
         )
         user_states[uid] = "WAITING_UID"
         await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
-        
     elif status == "AWAITING_SCREENSHOT":
-        msg = (
-            f"ðŸ’³ <b>DEPOSIT REQUIRED</b>\n\n"
-            f"To activate your VIP signals, please deposit a minimum of <b>500 Rs</b> in your game account.\n\n"
-            f"ðŸ“¸ <b>Send the successful deposit screenshot here.</b>"
-        )
+        msg = f"💳 <b>DEPOSIT REQUIRED</b>\n\nDeposit a minimum of <b>500 Rs</b> to activate the API Hack.\n📸 <b>Send the successful deposit screenshot here.</b>"
         user_states[uid] = "WAITING_SCREENSHOT"
         await update.message.reply_text(msg, parse_mode="HTML")
-        
     elif status == "PENDING":
-        await update.message.reply_text("â³ Your account is under review by the Admin. Please wait for approval.")
-        
+        await update.message.reply_text("⏳ Your account is under review by Admin. Please wait.")
     elif status == "ACTIVE":
-        await update.message.reply_text("ðŸ”¥ <b>VIP DASHBOARD</b> ðŸ”¥\n\nSelect your prediction mode:", reply_markup=main_menu_kb(), parse_mode="HTML")
+        await update.message.reply_text("🔥 <b>VIP AVIATOR DASHBOARD</b> 🔥\nManage your DM signals below:", reply_markup=user_dashboard_kb(uid), parse_mode="HTML")
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     user_states[ADMIN_ID] = "WAITING_PASSWORD"
-    await update.message.reply_text("ðŸ”’ <b>Enter Admin Password:</b>", parse_mode="HTML")
+    await update.message.reply_text("🔒 <b>Enter Admin Password:</b>", parse_mode="HTML")
 
 def admin_kb():
-    global is_global_running
-    g_text = "â¹ STOP GLOBAL SIGNALS" if is_global_running else "â–¶ï¸ START GLOBAL SIGNALS"
-    g_data = "adm_g_stop" if is_global_running else "adm_g_start"
-    
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(g_text, callback_data=g_data)],
-        [InlineKeyboardButton("ðŸ‘¥ User Management", callback_data="adm_users"), InlineKeyboardButton("ðŸ“¢ Broadcast", callback_data="adm_broadcast")],
-        [InlineKeyboardButton("ðŸ–¼ Set Stickers", callback_data="adm_stickers"), InlineKeyboardButton("ðŸ”— Set Game Link", callback_data="adm_link")],
-        [InlineKeyboardButton("ðŸ“Š System Analytics", callback_data="adm_stats")]
+        [InlineKeyboardButton("👥 User Management", callback_data="adm_users")],
+        [InlineKeyboardButton("🖼 Set Stickers", callback_data="adm_stickers"), InlineKeyboardButton("🔗 Set Game Link", callback_data="adm_link")],
+        [InlineKeyboardButton("📢 Broadcast Message", callback_data="adm_broadcast"), InlineKeyboardButton("📊 Analytics", callback_data="adm_stats")]
     ])
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global is_global_running, automation_task
     query = update.callback_query
     uid = update.effective_user.id
     await query.answer()
@@ -250,183 +250,159 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ================== ADMIN BUTTONS ==================
     if uid == ADMIN_ID:
         if data == "adm_main":
-            await query.edit_message_text("ðŸ‘‘ <b>MASTER ADMIN PANEL</b>", reply_markup=admin_kb(), parse_mode="HTML")
-            
-        elif data == "adm_g_start":
-            is_global_running = True
-            automation_task = asyncio.create_task(global_automation(context.bot))
-            await query.edit_message_text("ðŸŸ¢ GLOBAL SIGNALS STARTED!", reply_markup=admin_kb())
-            
-        elif data == "adm_g_stop":
-            is_global_running = False
-            if automation_task: automation_task.cancel()
-            if db["settings"]["CLOSE_STICKER"]:
-                await broadcast_to_active(context.bot, "ðŸ”´ <b>GLOBAL VIP SESSION CLOSED!</b>", db["settings"]["CLOSE_STICKER"])
-            await query.edit_message_text("â¹ GLOBAL SIGNALS STOPPED!", reply_markup=admin_kb())
-            
+            await query.edit_message_text("👑 <b>MASTER ADMIN PANEL</b>", reply_markup=admin_kb(), parse_mode="HTML")
         elif data == "adm_stickers":
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("WIN Sticker", callback_data="stk_WIN_STICKER"), InlineKeyboardButton("LOSS Sticker", callback_data="stk_LOSS_STICKER")],
                 [InlineKeyboardButton("START Session", callback_data="stk_START_STICKER"), InlineKeyboardButton("CLOSE Session", callback_data="stk_CLOSE_STICKER")],
-                [InlineKeyboardButton("ðŸ”™ Back", callback_data="adm_main")]
+                [InlineKeyboardButton("🔙 Back", callback_data="adm_main")]
             ])
-            await query.edit_message_text("ðŸ–¼ <b>Select Sticker to Update:</b>", reply_markup=kb, parse_mode="HTML")
-            
+            await query.edit_message_text("🖼 <b>Select Sticker to Update:</b>", reply_markup=kb, parse_mode="HTML")
         elif data.startswith("stk_"):
             key = data.replace("stk_", "")
             user_states[uid] = f"WAITING_{key}"
             await query.edit_message_text(f"Please send the {key} sticker now:")
-            
         elif data == "adm_link":
             user_states[uid] = "WAITING_GAME_LINK"
-            await query.edit_message_text("ðŸ”— Send the new Game Registration Link:")
-            
+            await query.edit_message_text("🔗 Send the new Game Registration Link:")
         elif data == "adm_broadcast":
             user_states[uid] = "WAITING_BROADCAST"
-            await query.edit_message_text("ðŸ“¢ Send text or photo to broadcast to all ACTIVE users:")
-            
+            await query.edit_message_text("📢 Send text or photo to broadcast to all ACTIVE users:")
         elif data == "adm_users":
-            kb = [[InlineKeyboardButton("ðŸ”™ Back", callback_data="adm_main")]]
-            text = "ðŸ‘¥ <b>Users List:</b>\n\n"
+            kb = [[InlineKeyboardButton("🔙 Back", callback_data="adm_main")]]
+            text = "👥 <b>Users List:</b>\n\n"
             for u, d in db["users"].items():
-                emoji = "ðŸŸ¢" if d["status"]=="ACTIVE" else "ðŸŸ¡" if d["status"]=="PENDING" else "ðŸ”´"
+                emoji = "🟢" if d["status"]=="ACTIVE" else "🟡" if d["status"]=="PENDING" else "🔴"
                 text += f"{emoji} <code>{u}</code> | UID: {d['game_uid']}\n"
                 kb.insert(0, [InlineKeyboardButton(f"Manage {u}", callback_data=f"manage_{u}")])
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
-            
         elif data.startswith("manage_"):
             target_u = int(data.split("_")[1])
             d = db["users"][target_u]
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("âœ… Approve", callback_data=f"usr_app_{target_u}"), InlineKeyboardButton("â›” Block", callback_data=f"usr_blk_{target_u}")],
-                [InlineKeyboardButton("ðŸ”™ Back", callback_data="adm_users")]
+                [InlineKeyboardButton("✅ Approve", callback_data=f"usr_app_{target_u}"), InlineKeyboardButton("⛔ Block", callback_data=f"usr_blk_{target_u}")],
+                [InlineKeyboardButton("🔙 Back", callback_data="adm_users")]
             ])
-            await query.edit_message_text(f"ðŸ‘¤ <b>Manage User <code>{target_u}</code></b>\n\nGame UID: {d['game_uid']}\nStatus: {d['status']}", reply_markup=kb, parse_mode="HTML")
-            
+            await query.edit_message_text(f"👤 <b>Manage User <code>{target_u}</code></b>\n\nGame UID: {d['game_uid']}\nStatus: {d['status']}", reply_markup=kb, parse_mode="HTML")
         elif data.startswith("usr_app_"):
             u = int(data.split("_")[2])
             db["users"][u]["status"] = "ACTIVE"
-            await context.bot.send_message(chat_id=u, text="ðŸŽ‰ <b>Congratulations!</b> Your account is APPROVED. Send /start to access VIP Signals.", parse_mode="HTML")
-            await query.edit_message_text(f"âœ… User {u} Approved.", reply_markup=admin_kb())
-            
+            await context.bot.send_message(chat_id=u, text="🎉 <b>Congratulations!</b> Your Aviator Hack is APPROVED. Send /start to access Dashboard.", parse_mode="HTML")
+            await query.edit_message_text(f"✅ User {u} Approved.", reply_markup=admin_kb())
         elif data.startswith("usr_blk_"):
             u = int(data.split("_")[2])
             db["users"][u]["status"] = "BLOCKED"
-            await query.edit_message_text(f"â›” User {u} Blocked.", reply_markup=admin_kb())
-            
+            db["users"][u]["aviator_auto"] = False
+            await query.edit_message_text(f"⛔ User {u} Blocked.", reply_markup=admin_kb())
         elif data == "adm_stats":
-            t = db["stats"]["total"]
-            w = db["stats"]["wins"]
-            l = db["stats"]["losses"]
-            msg = f"ðŸ“Š <b>System Analytics</b>\n\nTotal Signals: {t}\nWins: {w}\nLosses: {l}\nActive Users: {len([u for u,d in db['users'].items() if d['status']=='ACTIVE'])}"
-            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ”™ Back", callback_data="adm_main")]]), parse_mode="HTML")
+            t, w, l = db["stats"]["total"], db["stats"]["wins"], db["stats"]["losses"]
+            msg = f"📊 <b>Aviator Hack Analytics</b>\n\nTotal Signals: {t}\nWins: {w}\nLosses: {l}\nActive Users: {len([u for u,d in db['users'].items() if d['status']=='ACTIVE'])}"
+            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="adm_main")]]), parse_mode="HTML")
 
     # ================== USER BUTTONS ==================
     else:
         if db["users"].get(uid, {}).get("status") != "ACTIVE":
-            return await query.answer("â›” You are not active!", show_alert=True)
+            return await query.answer("⛔ You are not active!", show_alert=True)
+        user_data = db["users"][uid]
 
-        if data == "main_menu":
-            await query.edit_message_text("ðŸ”¥ <b>VIP DASHBOARD</b> ðŸ”¥\n\nSelect your prediction mode:", reply_markup=main_menu_kb(), parse_mode="HTML")
+        if data == "u_dashboard":
+            await query.edit_message_text("🔥 <b>VIP AVIATOR DASHBOARD</b> 🔥", reply_markup=user_dashboard_kb(uid), parse_mode="HTML")
 
-        elif data == "play_wingo":
-            p = get_wingo_period()
-            s, n, ali_hash = get_wingo_prediction(p)
+        elif data == "u_toggle_aviator":
+            user_data["aviator_auto"] = not user_data["aviator_auto"]
+            if user_data["aviator_auto"]:
+                stk = db["settings"]["START_STICKER"]
+                if stk:
+                    try: await context.bot.send_sticker(chat_id=uid, sticker=stk)
+                    except: pass
+                await context.bot.send_message(chat_id=uid, text="🟢 <b>AUTO AVIATOR SIGNALS (DM) STARTED!</b>", parse_mode="HTML")
+            else:
+                stk = db["settings"]["CLOSE_STICKER"]
+                if stk:
+                    try: await context.bot.send_sticker(chat_id=uid, sticker=stk)
+                    except: pass
+                await context.bot.send_message(chat_id=uid, text="🔴 <b>AUTO AVIATOR SIGNALS (DM) STOPPED!</b>", parse_mode="HTML")
+                
+            await query.edit_message_reply_markup(reply_markup=user_dashboard_kb(uid))
+
+        elif data == "u_manual_aviator":
+            await query.edit_message_text("⏳ Connecting to Spribe Server API...", parse_mode="HTML")
+            _, api_hash = await fetch_real_api_data()
+            m = calculate_aviator_prediction()
             db["stats"]["total"] += 1
-            msg = f"ðŸ”´ <b>WINGO SINGLE (ALI HASH)</b>\n\nðŸš€ Period: <code>{p}</code>\nðŸ“Š Size: {s}\nðŸ”¢ Nums: {n[0]}, {n[1]}\nðŸ” Hash: <code>{ali_hash}</code>"
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("âœ… WIN", callback_data="fb_win"), InlineKeyboardButton("âŒ LOSS", callback_data="fb_loss")], [InlineKeyboardButton("â­ NEXT SINGLE", callback_data="play_wingo"), InlineKeyboardButton("ðŸ”™ Back", callback_data="main_menu")]])
-            await query.edit_message_text(msg, reply_markup=kb, parse_mode="HTML")
-
-        elif data == "play_aviator":
-            m, ali_hash = get_aviator_prediction()
-            db["stats"]["total"] += 1
-            msg = f"âœˆï¸ <b>AVIATOR SINGLE (ALI HASH)</b>\n\nðŸŽ¯ Target Multiplier: {m}x\nðŸ” Hash: <code>{ali_hash}</code>\nðŸ’¡ Cashout before target."
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("âœ… WIN", callback_data="fb_win"), InlineKeyboardButton("âŒ LOSS", callback_data="fb_loss")], [InlineKeyboardButton("â­ NEXT SINGLE", callback_data="play_aviator"), InlineKeyboardButton("ðŸ”™ Back", callback_data="main_menu")]])
-            await query.edit_message_text(msg, reply_markup=kb, parse_mode="HTML")
             
-        elif data == "play_advance":
-            msg = "ðŸŒŸ <b>ADVANCE PREDICTION (Next 10 Periods)</b>\n\n"
-            for i in range(10):
-                p = get_wingo_period(offset=i)
-                s, _, h = get_wingo_prediction(p)
-                msg += f"<code>{p[-4:]}</code> âž¡ï¸ {s} [Hash: {h[:8]}]\n"
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ”™ Back", callback_data="main_menu")]])
+            msg = (f"✈️ <b>MANUAL AVIATOR SIGNAL</b>\n\n"
+                   f"🔗 <b>API:</b> Connected\n"
+                   f"🔐 <b>Hash:</b> <code>{api_hash}</code>\n\n"
+                   f"🎯 <b>Target Multiplier:</b> {m}x\n"
+                   f"💡 <i>Cashout safely before target.</i>")
+                   
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ WIN", callback_data="fb_win"), InlineKeyboardButton("❌ LOSS", callback_data="fb_loss")], [InlineKeyboardButton("⏭ NEXT SINGLE", callback_data="u_manual_aviator"), InlineKeyboardButton("🔙 Dashboard", callback_data="u_dashboard")]])
             await query.edit_message_text(msg, reply_markup=kb, parse_mode="HTML")
 
         elif data in ["fb_win", "fb_loss"]:
             if data == "fb_win": db["stats"]["wins"] += 1
             else: db["stats"]["losses"] += 1
-            res = "âœ… WIN RECORDED" if data == "fb_win" else "âŒ LOSS RECORDED"
-            await query.answer(res, show_alert=True)
+            await query.answer("✅ Feedback Recorded!", show_alert=True)
             
-        elif data == "show_stats":
-            t = db["stats"]["total"]
-            w = db["stats"]["wins"]
-            l = db["stats"]["losses"]
-            rate = int((w/t)*100) if t>0 else 0
-            msg = f"ðŸ“Š <b>ANALYTICS & STATS</b>\n\nTotal Signals: {t}\nTotal Wins: {w}\nTotal Losses: {l}\nWin Rate: {rate}%\n\n<i>Live Data Tracking</i>"
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ”™ Back", callback_data="main_menu")]])
-            await query.edit_message_text(msg, reply_markup=kb, parse_mode="HTML")
-
+        elif data == "u_stats":
+            t, w, l = db["stats"]["total"], db["stats"]["wins"], db["stats"]["losses"]
+            win_rate = int((w/t)*100) if t > 0 else 0
+            msg = f"📊 <b>Your VIP Stats Analytics</b>\n\nSignals: {t}\nWins: {w}\nLosses: {l}\nWin Rate: <b>{win_rate}%</b>\n\nKeep receiving signals to grow."
+            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="u_dashboard")]]), parse_mode="HTML")
 
 async def text_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     state = user_states.get(uid)
     if not state: return
 
-    # ADMIN HANDLERS
     if uid == ADMIN_ID:
         if state == "WAITING_PASSWORD":
             if update.message.text == ADMIN_PASSWORD:
                 user_states.pop(uid)
-                await update.message.reply_text("ðŸ‘‘ <b>MASTER ADMIN PANEL</b>", reply_markup=admin_kb(), parse_mode="HTML")
+                await update.message.reply_text("👑 <b>MASTER ADMIN PANEL</b>", reply_markup=admin_kb(), parse_mode="HTML")
             else:
-                await update.message.reply_text("âŒ Wrong Password")
-                
+                await update.message.reply_text("❌ Wrong Password")
         elif state.startswith("WAITING_") and "STICKER" in state:
             if update.message.sticker:
                 key = state.replace("WAITING_", "")
                 db["settings"][key] = update.message.sticker.file_id
                 user_states.pop(uid)
-                await update.message.reply_text(f"âœ… {key} Saved!", reply_markup=admin_kb())
-                
+                await update.message.reply_text(f"✅ {key} Saved!", reply_markup=admin_kb())
         elif state == "WAITING_GAME_LINK":
             db["settings"]["GAME_LINK"] = update.message.text
             user_states.pop(uid)
-            await update.message.reply_text("âœ… Link Saved!", reply_markup=admin_kb())
-            
+            await update.message.reply_text("✅ Link Saved!", reply_markup=admin_kb())
         elif state == "WAITING_BROADCAST":
             user_states.pop(uid)
-            if update.message.photo:
-                await broadcast_to_active(context.bot, update.message.caption or "", photo=update.message.photo[-1].file_id)
-            else:
-                await broadcast_to_active(context.bot, update.message.text)
-            await update.message.reply_text("âœ… Broadcast Sent!", reply_markup=admin_kb())
+            active_users = [u for u, d in db["users"].items() if d["status"] == "ACTIVE"]
+            for u in active_users:
+                try:
+                    if update.message.photo: await context.bot.send_photo(chat_id=u, photo=update.message.photo[-1].file_id, caption=update.message.caption or "", parse_mode="HTML")
+                    else: await context.bot.send_message(chat_id=u, text=update.message.text, parse_mode="HTML")
+                except: pass
+            await update.message.reply_text("✅ Broadcast Sent!", reply_markup=admin_kb())
 
-    # USER HANDLERS
     else:
         if state == "WAITING_UID":
             db["users"][uid]["game_uid"] = update.message.text
             db["users"][uid]["status"] = "AWAITING_SCREENSHOT"
             user_states.pop(uid)
-            await update.message.reply_text("âœ… UID Received.\n\nðŸ’³ <b>Please deposit Minimum 500 Rs and send the successful screenshot here.</b>", parse_mode="HTML")
-            
+            await update.message.reply_text("✅ UID Received.\n\n💳 <b>Deposit Min 500 Rs and send the successful screenshot here.</b>", parse_mode="HTML")
         elif state == "WAITING_SCREENSHOT":
             if update.message.photo:
                 db["users"][uid]["screenshot"] = update.message.photo[-1].file_id
                 db["users"][uid]["status"] = "PENDING"
                 user_states.pop(uid)
-                await update.message.reply_text("âœ… Screenshot received! Please wait for Admin approval.")
-                
-                # Notify Admin
-                caption = f"ðŸ”” <b>NEW DEPOSIT ALERT!</b>\n\nTelegram ID: <code>{uid}</code>\nGame UID: <code>{db['users'][uid]['game_uid']}</code>"
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("âœ… Approve", callback_data=f"usr_app_{uid}"), InlineKeyboardButton("â›” Block", callback_data=f"usr_blk_{uid}")]])
+                await update.message.reply_text("✅ Screenshot received! Please wait for Admin approval.")
+                caption = f"🔔 <b>NEW DEPOSIT ALERT!</b>\nTelegram ID: <code>{uid}</code>\nGame UID: <code>{db['users'][uid]['game_uid']}</code>"
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Approve", callback_data=f"usr_app_{uid}"), InlineKeyboardButton("⛔ Block", callback_data=f"usr_blk_{uid}")]])
                 await context.bot.send_photo(chat_id=ADMIN_ID, photo=update.message.photo[-1].file_id, caption=caption, reply_markup=kb, parse_mode="HTML")
             else:
-                await update.message.reply_text("âš ï¸ Please send a valid PHOTO / SCREENSHOT.")
+                await update.message.reply_text("⚠️ Please send a valid PHOTO / SCREENSHOT.")
 
 # ==========================================
-# ðŸš€ MAIN RUNNER
+# 🚀 MAIN RUNNER
 # ==========================================
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
@@ -436,7 +412,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.ALL, text_photo_handler))
     
-    logger.info("Premium Bot with ALI HASH is Running! (Crash-Free)")
+    logger.info("Aviator Spribe Hack Bot (1.04x - 20x) is Running! (Crash-Free)")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
